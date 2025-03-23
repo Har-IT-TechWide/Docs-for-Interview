@@ -1,0 +1,288 @@
+Let’s convert your Jenkins pipeline snippet into a reusable GitHub Actions workflow. I'll break this down step-by-step, explaining the conversion process, and then provide the equivalent GitHub Actions YAML configuration.
+
+---
+
+### Key Differences Between Jenkins and GitHub Actions
+1. **Structure**:
+   - Jenkins uses a scripted or declarative pipeline with stages and steps.
+   - GitHub Actions uses a YAML-based workflow with jobs, steps, and actions.
+2. **Environment Variables**:
+   - Jenkins uses `env.` to set environment variables dynamically.
+   - GitHub Actions uses `env` at the job or step level, and GitHub provides predefined variables (e.g., `github.ref`, `github.event`).
+3. **SCM Checkout**:
+   - Jenkins requires `checkout scm` explicitly.
+   - GitHub Actions automatically checks out the repository using `actions/checkout`.
+4. **Script Execution**:
+   - Jenkins uses Groovy scripts for logic.
+   - GitHub Actions relies on shell scripts (bash, PowerShell, etc.) or reusable actions for complex logic.
+5. **Stashing**:
+   - Jenkins uses `stash` to pass files between stages/nodes.
+   - GitHub Actions uses artifacts or caching to share files between steps/jobs.
+
+---
+
+### Analysis of Your Jenkins Pipeline
+Your Jenkins `Prepare` stage performs the following:
+1. **Checkout**: Clones the repository.
+2. **Read Configuration**: Reads YAML files (`hcc-pipeline.yml`, `Chart.yaml`) and properties (`gradle.properties`).
+3. **Branch Discovery**: Determines the branch name and sets environment variables.
+4. **Validation**:
+   - Ensures the build runs only on `develop`, `master`, or PR branches.
+   - Validates `CHART_NAME` and `ARTIFACT_NAME` match.
+   - Checks version consistency between `Chart.yaml` and `gradle.properties`.
+5. **Environment Setup**: Sets variables like `BUILD_VERSION`, `DOCKER_IMAGE_TAG`, etc., based on branch and config.
+6. **Merge YAML Configs**: Merges environment-specific YAML files (e.g., `values-pr.yaml`, `values-dev.yaml`) with `hcc-pipeline.yml`.
+7. **Stashing**: Stores files for later stages.
+
+We’ll replicate this logic in GitHub Actions.
+
+---
+
+### GitHub Actions Conversion Strategy
+1. **Workflow Trigger**: Use `on` to trigger the workflow on `push` or `pull_request` to specific branches.
+2. **Job**: Create a single job (e.g., `prepare`) to mimic the `Prepare` stage.
+3. **Steps**:
+   - Checkout the repository.
+   - Install tools (e.g., Java, Helm, yq for YAML processing).
+   - Run shell scripts to replicate the Groovy logic.
+4. **Environment Variables**: Use `env` and GitHub context variables (`github.ref`, `github.event`).
+5. **Artifacts**: Use `actions/upload-artifact` to replace `stash`.
+
+---
+
+### GitHub Actions YAML Configuration
+Below is the converted GitHub Actions workflow:
+
+```yaml
+name: Prepare Workflow
+
+# Trigger the workflow on push or pull requests to specific branches
+on:
+  push:
+    branches:
+      - develop
+      - master
+  pull_request:
+    branches:
+      - develop
+      - master
+
+# Define environment variables at the workflow level
+env:
+  JAVA_VERSION: "" # Set dynamically in steps
+  HELM_VERSION: "" # Set dynamically in steps
+  GITHUB_CREDENTIALS: ${{ secrets.GITHUB_CREDENTIALS }}
+  SONAR_CREDENTIALS: ${{ secrets.SONAR_CREDENTIALS }}
+  REGISTRY_CREDENTIALS: ${{ secrets.REGISTRY_CREDENTIALS }}
+  TWISTLOCK_CREDENTIALS: ${{ secrets.TWISTLOCK_CREDENTIALS }}
+
+jobs:
+  prepare:
+    runs-on: ubuntu-latest
+
+    steps:
+      # Checkout the repository
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      # Install yq for YAML parsing
+      - name: Install yq
+        run: |
+          sudo snap install yq
+
+      # Install Java (version set dynamically later)
+      - name: Set up Java
+        uses: actions/setup-java@v4
+        with:
+          java-version: ${{ env.JAVA_VERSION }}
+          distribution: 'temurin'
+
+      # Install Helm (version set dynamically later)
+      - name: Set up Helm
+        run: |
+          curl -fsSL -o get_helm.sh https://raw.githubusercontent.com/helm/helm/master/scripts/get-helm-3
+          chmod +x get_helm.sh
+          ./get_helm.sh --version "${{ env.HELM_VERSION }}"
+
+      # Prepare step: replicate Jenkins logic
+      - name: Prepare environment
+        env:
+          WORK_BRANCH: ${{ github.ref_name }} # e.g., 'develop', 'master', or 'pr-123'
+          CHANGE_TARGET: ${{ github.event.pull_request.base.ref || '' }} # For PRs
+        run: |
+          # Helper function to echo banners
+          echo_banner() {
+            echo "=== $1 ==="
+            for msg in "${@:2}"; do echo "$msg"; done
+            echo "=========="
+          }
+
+          # Helper function to echo error banners and exit
+          error_banner() {
+            echo "ERROR: $1"
+            for msg in "${@:2}"; do echo "$msg"; done
+            exit 1
+          }
+
+          # Read YAML and properties files
+          CHART_NAME=$(yq eval '.name' cicd/chart/Chart.yaml)
+          ARTIFACT_NAME=$(yq eval '.pipeline.application.name' hcc-pipeline.yml)
+          BUILD_VERSION=$(yq eval '.appVersion' cicd/chart/Chart.yaml)
+          GRADLE_VERSION=$(grep 'artifact_version' gradle.properties | cut -d'=' -f2 | tr -d '[:space:]')
+
+          # Branch discovery and validation
+          DASHED_BRANCH=$(echo "$WORK_BRANCH" | tr '/' '-')
+          echo "WORK_BRANCH=$WORK_BRANCH" >> $GITHUB_ENV
+          echo "DASHED_BRANCH=$DASHED_BRANCH" >> $GITHUB_ENV
+
+          if [[ "$WORK_BRANCH" != "develop" && "$WORK_BRANCH" != "master" && ! "$WORK_BRANCH" =~ ^pr- ]]; then
+            error_banner "Terminating build due to $WORK_BRANCH branch" "The build will trigger only on Develop/Master/PR-* branch"
+          fi
+
+          # Validate name and version consistency
+          if [ "$CHART_NAME" != "$ARTIFACT_NAME" ]; then
+            error_banner "Terminating build due to a name conflict" "The application name in hcc-pipeline.yaml does not match the name supplied with your helm chart (Chart.yaml). Fix before proceeding."
+          fi
+
+          if [ "$BUILD_VERSION" != "$GRADLE_VERSION" ]; then
+            error_banner "Terminating build due to a version conflict" "The version in gradle.properties does not match the version supplied with your helm chart (Chart.yaml). Fix before proceeding."
+          fi
+
+          echo "BUILD_VERSION=$BUILD_VERSION" >> $GITHUB_ENV
+          echo "CHART_NAME=$CHART_NAME" >> $GITHUB_ENV
+          echo "ARTIFACT_NAME=$ARTIFACT_NAME" >> $GITHUB_ENV
+
+          # Set dynamic environment variables from config
+          JAVA_VERSION=$(yq eval '.pipeline.tools.versions.java' hcc-pipeline.yml)
+          HELM_VERSION=$(yq eval '.pipeline.tools.versions.helm' hcc-pipeline.yml)
+          REGISTRY_HOST=$(yq eval '.pipeline.application.image.registry.host' hcc-pipeline.yml)
+          DOCKER_GIC_HOSTNAME=$(yq eval '.pipeline.application.image.registry.gichost' hcc-pipeline.yml)
+          IMAGE_TAG_SUPPLIED=$(yq eval '.pipeline.application.image.tag' hcc-pipeline.yml)
+          HCCK8S_PROFILE=$(yq eval '.hcck8sProfile' hcc-pipeline.yml)
+          echo "JAVA_VERSION=$JAVA_VERSION" >> $GITHUB_ENV
+          echo "HELM_VERSION=$HELM_VERSION" >> $GITHUB_ENV
+          echo "REGISTRY_HOST=$REGISTRY_HOST" >> $GITHUB_ENV
+          echo "DOCKER_GIC_HOSTNAME=$DOCKER_GIC_HOSTNAME" >> $GITHUB_ENV
+          echo "HCCK8S_PROFILE=$HCCK8S_PROFILE" >> $GITHUB_ENV
+
+          # Determine Docker image tag
+          if [ -n "$IMAGE_TAG_SUPPLIED" ]; then
+            DOCKER_IMAGE_TAG="$IMAGE_TAG_SUPPLIED"
+          elif [[ "$WORK_BRANCH" =~ ^pr- ]]; then
+            DOCKER_IMAGE_TAG="$WORK_BRANCH"
+          elif [ "$WORK_BRANCH" = "master" ]; then
+            DOCKER_IMAGE_TAG="$BUILD_VERSION"
+          elif [ "$WORK_BRANCH" = "develop" ]; then
+            DOCKER_IMAGE_TAG="$BUILD_VERSION"
+          else
+            DOCKER_IMAGE_TAG="$DASHED_BRANCH-$BUILD_VERSION"
+          fi
+
+          # Set image path based on branch
+          if [ "$WORK_BRANCH" = "master" ]; then
+            IMAGE_PATH=$(yq eval '.pipeline.application.image.registry.path' hcc-pipeline.yml)
+          else
+            IMAGE_PATH=$(yq eval '.pipeline.application.image.registry.developpath' hcc-pipeline.yml)
+          fi
+
+          DOCKER_IMAGE_PATH_AND_TAG="${IMAGE_PATH}/${ARTIFACT_NAME}:${DOCKER_IMAGE_TAG}"
+          DOCKER_IMAGE="${REGISTRY_HOST}/${DOCKER_IMAGE_PATH_AND_TAG}"
+          echo "DOCKER_IMAGE_TAG=$DOCKER_IMAGE_TAG" >> $GITHUB_ENV
+          echo "IMAGE_PATH=$IMAGE_PATH" >> $GITHUB_ENV
+          echo "DOCKER_IMAGE_PATH_AND_TAG=$DOCKER_IMAGE_PATH_AND_TAG" >> $GITHUB_ENV
+          echo "DOCKER_IMAGE=$DOCKER_IMAGE" >> $GITHUB_ENV
+
+          # Set deployment environment
+          if [[ "$WORK_BRANCH" =~ ^pr- && "$CHANGE_TARGET" = "develop" ]]; then
+            DEPLOY_TO="pr"
+          elif [ "$WORK_BRANCH" = "develop" ]; then
+            DEPLOY_TO="dev"
+          elif [ "$WORK_BRANCH" = "master" ]; then
+            DEPLOY_TO="stage"
+          else
+            DEPLOY_TO=""
+          fi
+          echo "DEPLOY_TO=$DEPLOY_TO" >> $GITHUB_ENV
+
+          # Merge YAML configs
+          if [[ "$WORK_BRANCH" =~ ^pr- ]]; then
+            yq eval-all '. as $item ireduce ({}; . * $item)' hcc-pipeline.yml cicd/chart/values-pr.yaml > cicd/chart/merged-values-pr.yaml
+          elif [ "$WORK_BRANCH" = "develop" ]; then
+            yq eval-all '. as $item ireduce ({}; . * $item)' hcc-pipeline.yml cicd/chart/values-dev.yaml > cicd/chart/merged-values-dev.yaml
+          fi
+
+      # Upload stashed files as artifacts
+      - name: Upload config artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: config-stash
+          path: |
+            **/cicd/**
+            hcc-pipeline.yml
+            vitals.yaml
+```
+
+---
+
+### Detailed Explanation
+1. **Triggers**:
+   - `on.push.branches`: Runs on pushes to `develop` or `master`.
+   - `on.pull_request.branches`: Runs on PRs targeting `develop` or `master`.
+
+2. **Environment Variables**:
+   - Predefined secrets (e.g., `GITHUB_CREDENTIALS`) are stored in GitHub Secrets.
+   - Dynamic variables (e.g., `WORK_BRANCH`) are derived from `github.ref_name`.
+
+3. **Steps**:
+   - **Checkout**: Uses `actions/checkout@v4` to clone the repo.
+   - **Install yq**: Installs `yq` for YAML parsing (replaces `readYaml`).
+   - **Set up Java/Helm**: Dynamically sets versions from `hcc-pipeline.yml`.
+   - **Prepare Environment**: A bash script replicates the Groovy logic:
+     - Reads YAML/properties files using `yq` and `grep`.
+     - Implements branch discovery and validation.
+     - Sets environment variables with `echo "VAR=VALUE" >> $GITHUB_ENV`.
+     - Merges YAML files using `yq eval-all`.
+   - **Upload Artifacts**: Replaces `stash` with `actions/upload-artifact`.
+
+4. **Branch Logic**:
+   - Uses `github.ref_name` for branch name and `github.event.pull_request.base.ref` for PR target.
+   - Replicates `isDevelopBranch()`, `isMasterBranch()`, and `isPullRequest()` with bash conditionals.
+
+5. **Missing Functions**:
+   - `isArtifactPublished()`: Not implemented here as it requires external system access (e.g., a registry API). You’d need to add a step to query your registry.
+   - `setDisplay()`: Omitted as its purpose isn’t clear from the snippet.
+
+6. **Parameters**:
+   - Jenkins `params` (e.g., `FORCE_REBUILD`) can be added as workflow inputs using `inputs` in a reusable workflow or as manual triggers with `workflow_dispatch`.
+
+---
+
+### Making It Reusable
+To make this a reusable workflow, move it to `.github/workflows/prepare.yml` and call it from another workflow:
+
+```yaml
+# .github/workflows/main.yml
+name: CI Pipeline
+on:
+  push:
+    branches:
+      - develop
+      - master
+  pull_request:
+    branches:
+      - develop
+      - master
+
+jobs:
+  call-prepare:
+    uses: ./.github/workflows/prepare.yml
+```
+
+---
+
+### Notes
+- **Secrets**: Store credentials (e.g., `GITHUB_CREDENTIALS`) in GitHub Secrets.
+- **Customization**: Adjust paths (e.g., `cicd/chart/`) if they differ in your repo.
+- **Further Stages**: Add more jobs (e.g., `build`, `deploy`) to extend this workflow.
+
+Let me know if you need help with additional stages or specific tweaks!

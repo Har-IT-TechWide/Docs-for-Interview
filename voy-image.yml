@@ -1,0 +1,18 @@
+FROM envoyproxy/envoy-distroless:v1.29.7
+
+
+# copy the static shell into base image.
+COPY --from=docker.loyd.com/product/busybox:1.36.1-uclibc /bin/sh /bin/sh
+
+
+# copy all necessary executables into distroless image.
+COPY --from=docker.loyd.com/product/busybox:1.36.1-uclibc /bin/mkdir /bin/mkdir
+COPY --from=docker.loyd.com/product/busybox:1.36.1-uclibc /bin/cat /bin/cat
+COPY --from=docker.loyd.com/product/busybox:1.36.1-uclibc /bin/ls /bin/ls
+
+
+# use wget for http calls in shell (curl not available on busybox
+COPY --from=docker.loyd.com/product/busybox:1.36.1-uclibc /bin/wget /bin/wget
+
+
+ENTRYPOINT ["/bin/sh", "/entrypoint.sh"]

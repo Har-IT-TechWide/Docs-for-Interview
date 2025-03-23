@@ -1,0 +1,368 @@
+# Run Selenium and Cucumber Tests
+
+name: Run Selenium and Cucumber Tests
+
+on:
+ push:
+   branches:
+     - master  # Change to your default branch if different
+     - feature/Scenario
+ workflow_dispatch:
+
+jobs:
+ Referral-HCR:
+   runs-on: [test-runner]
+
+   steps:
+     - uses: actions/checkout@v4
+     - name: Install Dependencies
+       run: sudo apt-get update && sudo apt-get -y install libnss3 libatk1.0-0 libatk-bridge2.0-0 libcups2 libdrm2 libxkbcommon0 libxcomposite1 libxdamage1 libxfixes3 libxrandr2 libgbm1 libpango-1.0-0 libcairo2 libasound2t64 python3
+     # Install Google Chrome
+     - name: Install Google Chrome
+       run: |
+         wget -q -O - https://dl.google.com/linux/linux_signing_key.pub | sudo apt-key add - 
+         sudo sh -c 'echo "deb [arch=amd64] http://dl.google.com/linux/chrome/deb/ stable main" > /etc/apt/sources.list.d/google-chrome.list' 
+         sudo apt-get update 
+         sudo apt-get install -y google-chrome-stable
+     - name: Check Chrome Version
+       run: google-chrome --version
+     - name: Set up JDK 11
+       uses: actions/setup-java@v3
+       with:
+         java-version: '11'
+         distribution: 'temurin'  # Use your preferred JDK distribution
+         cache: maven
+     - name: Set up Maven
+       uses: stCarolas/setup-maven@v5
+       with:
+         maven-version: 3.9.5
+     - name: Build and Run Tests with Maven
+       run: |
+         mvn clean verify -DskipTests=false
+
+     - name: Print working directory and List Files
+       run: |
+         pwd
+         ls -la
+         find output/ -type f -name "*.png"
+         ls -ld output/
+         ls -l output/
+         chmod -R 777 output/
+         ls -al output/
+     - name: Copy Myreport.html to target folder
+       run: |
+         cp output/MyReport.html target/
+     - name: List Files in 'target' Directory
+       run: ls -la target/
+     - name: Upload Cucumber Reports and Myreport.html
+       uses: actions/upload-artifact@v4
+       with:
+         name: cucumber-reports
+         path: |
+           target/cucumber-reports/ 
+           target/Myreport.html
+     - name: Summarize Test Results with Python
+       run: |
+         cat <<'EOF' > summarize_tests.py
+         import json
+         import glob 
+         import os
+        
+         def print_scenario_summary(scenario):
+           total_steps = len(scenario['steps'])
+           passed_steps = sum(1 for step in scenario['steps'] if step['result']['status'] == 'passed')
+           failed_steps = sum(1 for step in scenario['steps'] if step['result']['status'] == 'failed')
+           skipped_steps = sum(1 for step in scenario['steps'] if step['result']['status'] == 'skipped')
+           scenario_status = 'Passed' if failed_steps == 0 else 'Failed'
+        
+           # Inline style for the status indicator
+           status_color = "background-color: #d4edda; color: #155724;" if scenario_status == 'Passed' else "background-color: #FF7F50; color: #ffffff;"
+           indicator = f'<span style="display: inline-block; width: 10px; height: 10px; border-radius: 50%; {status_color}"></span>'        
+        
+           # Ensure Test Name is left-aligned, and other cells are centered
+           summary = f''' 
+           <tr style="{status_color}">
+               <td style="text-align: left;">{indicator} {scenario['name']}</td>
+               <td style="text-align: center;">{total_steps}</td>
+               <td style="text-align: center;">{passed_steps}</td>
+               <td style="text-align: center;">{failed_steps}</td>
+               <td style="text-align: center;">{skipped_steps}</td>
+               <td style="text-align: center;">{scenario_status}</td>
+           </tr>
+           '''
+           return {
+               "Test Name": scenario['name'],
+               "Total steps in scenario": total_steps,
+               "Steps passed": passed_steps,
+               "Steps failed": failed_steps,
+               "Steps skipped": skipped_steps,
+               "Status": scenario_status,
+               "Summary": summary
+           }         
+         # Find all JSON files in the target/cucumber-reports directory 
+         json_files = glob.glob('target/cucumber-reports/*.json')          
+         total_scenarios = 0
+         passed_scenarios = 0
+         failed_scenarios = 0
+         skipped_scenarios = 0
+         data = []
+        
+         # Iterate over each JSON file
+         for json_file in json_files:
+           # Load the JSON file
+           with open(json_file) as f:
+             cucumber_results = json.load(f)
+        
+           # Update the summary counts
+           for feature in cucumber_results:
+             for scenario in feature['elements']:
+               total_scenarios += 1
+               summary = print_scenario_summary(scenario)
+               data.append(summary)
+               if summary["Status"] == 'Passed': 
+                 passed_scenarios += 1 
+               elif summary["Status"] == 'Failed': 
+                 failed_scenarios += 1
+               else:
+                 skipped_scenarios += 1
+        
+         # Prepare the HTML table 
+         table1 = '''
+         <table class="summary-table" style="width: 100%; border-collapse: collapse; margin-top: 20px; border: 1px solid #ddd;">
+         <thead>
+         <tr style="background-color: #f2f2f2;">
+         <th>Test Name</th>
+         <th>Total steps in scenario</th>
+         <th>Steps passed</th>
+         <th>Steps failed</th>
+         <th>Steps skipped</th>
+         <th>Status</th>
+         </tr>
+         </thead>
+         <tbody>
+         ''' 
+        
+         # Iterate over the data and add rows to the table 
+         for entry in data:
+             table1 += entry["Summary"]
+        
+         # Close the table 
+         table1 += '''
+         </tbody>
+         </table>
+         ''' 
+        
+         print(table1)   
+        
+         # Prepare the HTML table 
+         table2 = '''
+         <table class="summary-table">
+         <thead>
+         <tr>
+         <th>Metric</th>
+         <th>Count</th>
+         </tr>
+         </thead>
+         <tbody>
+         ''' 
+        
+         # Add rows to the table
+         row = f'''
+         <tr>
+         <td>Total Scenarios</td>
+         <td>{total_scenarios}</td>
+         </tr>
+         <tr>
+         <td>Passed Scenarios</td>
+         <td>{passed_scenarios}</td>
+         </tr>
+         <tr>
+         <td>Failed Scenarios</td>
+         <td>{failed_scenarios}</td>
+         </tr>
+         <tr>
+         <td>Skipped Scenarios</td>
+         <td>{skipped_scenarios}</td>
+         </tr>
+         ''' 
+         table2 += row 
+        
+         # Close the table 
+         table2 += '''
+         </tbody>
+         </table>
+         ''' 
+        
+         print(table2) 
+        
+         # Print the HTML table 
+         print(table1) 
+        
+         overall_summary = f'''
+         Total Scenarios: {total_scenarios}
+         Passed Scenarios: {passed_scenarios}
+         Failed Scenarios: {failed_scenarios}
+         Skipped Scenarios: {skipped_scenarios}
+         '''
+        
+         print(overall_summary)
+        
+         # Write the overall summary to the GitHub job summary. in write add {table2} to print table2 also
+         summary_file = os.environ.get('GITHUB_STEP_SUMMARY')
+         if summary_file:
+           with open(summary_file, 'a') as f:
+             f.write(f'''
+         {table1}
+         ''')
+         else:
+           print("GITHUB_STEP_SUMMARY environment variable is not set.")
+        
+         # Optionally, write the summary to a file for artifact upload.add {table2} to print table2 also
+         with open('Test_summary.html', 'w') as f: 
+             f.write(f'''
+         {table1}
+         ''')
+        
+         # Set environment variables for use in subsequent steps
+         with open(os.environ['GITHUB_ENV'], 'a') as env_file:
+           env_file.write(f'TOTAL_SCENARIOS={total_scenarios}\n')
+           env_file.write(f'PASSED_SCENARIOS={passed_scenarios}\n')
+           env_file.write(f'FAILED_SCENARIOS={failed_scenarios}\n')
+           env_file.write(f'SKIPPED_SCENARIOS={skipped_scenarios}\n')
+         EOF
+         python3 summarize_tests.py
+     - name: Upload Test Summary
+       uses: actions/upload-artifact@v4
+       with:
+         name: Test-summary
+         path: Test_summary.html
+     # Step to read the test summary into an output variable
+     - name: Read Test Summary into output variable
+       id: read_test_summary
+       run: |
+         summary=$(cat Test_summary.html) 
+         echo 'summary<<EOF' >> $GITHUB_OUTPUT 
+         echo "$summary" >> $GITHUB_OUTPUT 
+         echo 'EOF' >> $GITHUB_OUTPUT
+     - name: Send Email with Test Results
+       uses: test-actions/action-send-mail@v3
+       with:
+         server_address: mailo2.test-hc.com
+         server_port: 25
+         subject: "Referral HCR Results - ${{ github.repository }} #${{ github.run_number }}"
+         to: 'radharapu_thirupathi@test-ing.com'
+         from: 'noreply@example.com'           # Replace with sender email
+         attachments: |
+           target/MyReport.html
+         html_body: |
+           <!DOCTYPE html> 
+           <html lang="en"> 
+           <head> 
+           <meta charset="UTF-8"> 
+           <meta name="viewport" content="width=device-width, initial-scale=1.0"> 
+           <title>Automation Report</title> 
+           <style> 
+             body { 
+               font-family: Arial, sans-serif; 
+               background-color: #f1f5f8; 
+               margin: 0; 
+               padding: 0; 
+               color: #333; 
+             } 
+             .header { 
+               text-align: center; 
+               border-radius: 10px 10px 0 0; 
+               margin: 0; 
+               box-shadow: 0 2px 4px rgba(0, 0, 0, 0.1); 
+               padding: 10px; 
+               background-color: rgb(0, 38, 119); 
+             }
+             .header .label { 
+               color: white; 
+               font-size: 24px; 
+               }
+             .content { 
+               padding: 20px; 
+               background-color: #fff; 
+               border-radius: 0 0 10px 10px; 
+               margin: 0;
+               box-shadow: 0 4px 8px rgba(0, 0, 0, 0.1);
+               max-width: 100%;
+             } 
+             .link { 
+               color: #3498db; 
+               text-decoration: none; 
+             } 
+             .link:hover { 
+               text-decoration: underline; 
+             } 
+             .note { 
+               text-align: center; 
+               font-size: 12px; 
+               margin-top: 20px; 
+               color: #777; 
+             } 
+             .highlight { 
+               background-color: #f9ca24; 
+               padding: 5px 10px; 
+               border-radius: 5px; 
+             } 
+             .summary-table { 
+               width: 100%; 
+               border-collapse: collapse; 
+               margin-top: 20px; 
+             } 
+             .summary-table th, 
+             .summary-table td { 
+               border: 1px solid #ddd; 
+               padding: 8px; 
+               text-align: center; /* Center text */
+               font-size: 12px; /* Reduced font size */
+             } 
+             .summary-table th { 
+               background-color: #f2f2f2; 
+             }
+             .summary-table tr.passed {
+             background-color: #d4edda; /* Green background */
+             color: #155724;           /* Dark green text */
+             }
+             .summary-table tr.failed {
+             background-color: #f8d7da; /* Red background */
+             color: #721c24;           /* Dark red text */
+             }
+             .failed-indicator { 
+               display: inline-block;
+               width: 10px;
+               height: 10px;
+               background-color: #ff0000; 
+               border-radius: 50%;
+               margin-right: 5px;
+             }
+           </style> 
+           </head> 
+           <body> 
+           <div class="header"> 
+             <h2 class="label">UHCP Referral HCR Results</h2>
+           </div>
+           <div class="content"> 
+             <p>Hi Team,</p> 
+             <p>Please find below the <strong>HCR Test Results Summary</strong> from the latest test run:</p> 
+          
+             <!-- Include the Test Results Summary --> 
+             ${{ steps.read_test_summary.outputs.summary }} 
+          
+             <p>You can view the <a href="${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}" class="link">Job Summary here</a>.</p> 
+             <p>You'll find the uploaded artifacts on the job summary page. Click on the file to download and extract it from the zip/compressed folder to view the detailed report.</p> 
+             <p>Thank you!</p> 
+             <div class="note"> 
+               <p><span class="highlight">Note:</span> This is an automated email generated from the build process by GitHub Actions.</p> 
+             </div> 
+           </div>
+           </body> 
+           </html>
+         convert_markdown: false
+
+
+
+
+
